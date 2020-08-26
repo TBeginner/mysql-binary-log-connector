@@ -21,6 +21,8 @@ import com.github.shyiko.mysql.binlog.io.ByteArrayOutputStream;
 import com.github.shyiko.mysql.binlog.network.IdentityVerificationException;
 import com.github.shyiko.mysql.binlog.network.SSLSocketFactory;
 import com.github.shyiko.mysql.binlog.network.protocol.command.Command;
+import com.github.shyiko.mysql.binlog.network.protocol.command.plugin.AuthPlugin;
+import com.github.shyiko.mysql.binlog.utils.ByteUtils;
 
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLSocket;
@@ -32,6 +34,9 @@ import java.nio.channels.Channel;
  * @author <a href="mailto:stanley.shyiko@gmail.com">Stanley Shyiko</a>
  */
 public class PacketChannel implements Channel {
+
+    private String serverVersion;
+    private boolean usingSSLSocket;
 
     private Socket socket;
     private ByteArrayInputStream inputStream;
@@ -63,16 +68,28 @@ public class PacketChannel implements Channel {
 
     public void write(Command command, int packetNumber) throws IOException {
         byte[] body = command.toByteArray();
+        write(body, packetNumber);
+    }
+
+    public void write(AuthPlugin authPlugin, int packetNumber) throws IOException {
+        byte[] body = authPlugin.toByteArray();
+        write(body, packetNumber);
+    }
+
+    public void write(byte[] body, int packetNumber) throws  IOException {
         ByteArrayOutputStream buffer = new ByteArrayOutputStream();
         buffer.writeInteger(body.length, 3); // packet length
         buffer.writeInteger(packetNumber, 1);
         buffer.write(body, 0, body.length);
-        outputStream.write(buffer.toByteArray());
+        write(buffer.toByteArray());
+    }
+
+    public void write(byte[] body) throws  IOException {
+        outputStream.write(body);
         // though it has no effect in case of default (underlying) output stream (SocketOutputStream),
         // it may be necessary in case of non-default one
         outputStream.flush();
     }
-
     /**
      * @deprecated use {@link #write(Command, int)} instead
      */
@@ -116,5 +133,45 @@ public class PacketChannel implements Channel {
             // ignore
         }
         socket.close();
+    }
+
+    public String getServerVersion() {
+        return serverVersion;
+    }
+
+    public void setServerVersion(String serverVersion) {
+        this.serverVersion = serverVersion;
+    }
+
+    public boolean isUsingSSLSocket() {
+        return usingSSLSocket;
+    }
+
+    public void setUsingSSLSocket(boolean usingSSLSocket) {
+        this.usingSSLSocket = usingSSLSocket;
+    }
+
+    /**
+     * <p>比较版本号</p>
+     * <p>若使用的版本号小于指定版本号，返回True</p>
+     * <p>否则，返回False</p>
+     * @param anotherServerVersion
+     * @return boolean
+     */
+    public boolean compareServerVersion(String anotherServerVersion) {
+        String[] src = getServerVersion().split("\\.");
+        String[] another = anotherServerVersion.split("\\.");
+
+        for (int i = 0; i < another.length; i++) {
+            Integer anoVal = Integer.parseInt(another[i]);
+            Integer srcVal = Integer.parseInt(src[i]);
+
+            if (srcVal < anoVal) {
+                return true;
+            } else if (srcVal > anoVal) {
+                return false;
+            }
+        }
+        return false;
     }
 }

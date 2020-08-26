@@ -40,19 +40,13 @@ import com.github.shyiko.mysql.binlog.network.SSLSocketFactory;
 import com.github.shyiko.mysql.binlog.network.ServerException;
 import com.github.shyiko.mysql.binlog.network.SocketFactory;
 import com.github.shyiko.mysql.binlog.network.TLSHostnameVerifier;
-import com.github.shyiko.mysql.binlog.network.protocol.ErrorPacket;
-import com.github.shyiko.mysql.binlog.network.protocol.GreetingPacket;
-import com.github.shyiko.mysql.binlog.network.protocol.Packet;
-import com.github.shyiko.mysql.binlog.network.protocol.PacketChannel;
-import com.github.shyiko.mysql.binlog.network.protocol.ResultSetRowPacket;
-import com.github.shyiko.mysql.binlog.network.protocol.command.AuthenticateCommand;
-import com.github.shyiko.mysql.binlog.network.protocol.command.AuthenticateNativePasswordCommand;
-import com.github.shyiko.mysql.binlog.network.protocol.command.Command;
-import com.github.shyiko.mysql.binlog.network.protocol.command.DumpBinaryLogCommand;
-import com.github.shyiko.mysql.binlog.network.protocol.command.DumpBinaryLogGtidCommand;
-import com.github.shyiko.mysql.binlog.network.protocol.command.PingCommand;
-import com.github.shyiko.mysql.binlog.network.protocol.command.QueryCommand;
-import com.github.shyiko.mysql.binlog.network.protocol.command.SSLRequestCommand;
+import com.github.shyiko.mysql.binlog.network.protocol.*;
+import com.github.shyiko.mysql.binlog.network.protocol.command.*;
+import com.github.shyiko.mysql.binlog.network.protocol.command.plugin.AuthPlugin;
+import com.github.shyiko.mysql.binlog.network.protocol.encode.UnionEncryptor;
+import com.github.shyiko.mysql.binlog.network.protocol.encode.XOREncryptor;
+import com.github.shyiko.mysql.binlog.utils.ByteUtils;
+import com.github.shyiko.mysql.binlog.network.protocol.encode.RSAEncryptor;
 
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.TrustManager;
@@ -122,6 +116,8 @@ public class BinaryLogClient implements BinaryLogClientMXBean {
     private final String schema;
     private final String username;
     private final String password;
+
+    private String serverPublicKey;
 
     private boolean blocking = true;
     private long serverId = 65535;
@@ -718,6 +714,7 @@ public class BinaryLogClient implements BinaryLogClientMXBean {
 
     private void authenticate(final PacketChannel channel, GreetingPacket greetingPacket) throws IOException {
         int collation = greetingPacket.getServerCollation();
+        channel.setServerVersion(greetingPacket.getServerVersion());
         int packetNumber = 1;
 
         boolean usingSSLSocket = false;
@@ -740,55 +737,95 @@ public class BinaryLogClient implements BinaryLogClientMXBean {
                 channel.upgradeToSSL(sslSocketFactory,
                     sslMode == SSLMode.VERIFY_IDENTITY ? new TLSHostnameVerifier() : null);
                 usingSSLSocket = true;
+                channel.setUsingSSLSocket(true);
             }
         }
+
         AuthenticateCommand authenticateCommand = new AuthenticateCommand(schema, username, password,
-            greetingPacket.getScramble());
+            greetingPacket.getScramble(), greetingPacket.getPluginProvidedData());
         authenticateCommand.setCollation(collation);
         channel.write(authenticateCommand, packetNumber);
-        byte[] authenticationResult = channel.read();
-        if (authenticationResult[0] != (byte) 0x00 /* ok */) {
-            if (authenticationResult[0] == (byte) 0xFF /* error */) {
-                byte[] bytes = Arrays.copyOfRange(authenticationResult, 1, authenticationResult.length);
+        authFinishOrSwitch(channel, greetingPacket.getPluginProvidedData().getBytes(), packetNumber);
+    }
+
+    private void authFinishOrSwitch(final PacketChannel channel, byte[] authPluginData, Integer packetNumber) throws IOException {
+        byte[] result = channel.read();
+        packetNumber++;
+        switch (result[0]) {
+            case (byte) 0x00:
+                // OK_Packet
+                // 握手成功
+                break;
+            case (byte) 0xFF:
+                // ERR_Packet
+                byte[] bytes = Arrays.copyOfRange(result, 1, result.length);
                 ErrorPacket errorPacket = new ErrorPacket(bytes);
                 throw new AuthenticationException(errorPacket.getErrorMessage(), errorPacket.getErrorCode(),
                     errorPacket.getSqlState());
-            } else if (authenticationResult[0] == (byte) 0xFE) {
-                switchAuthentication(channel, authenticationResult, usingSSLSocket);
-            } else {
-                throw new AuthenticationException("Unexpected authentication result (" + authenticationResult[0] + ")");
-            }
+            case (byte) 0xFE:
+                // auth_switch_request 包
+                // 服务器返回切换认证方式请求包
+                ByteArrayInputStream buffer = new ByteArrayInputStream(result);
+                buffer.read(1);
+                String authName = buffer.readZeroTerminatedString();
+                byte[] scramble = buffer.read(20);
+
+                AuthPlugin authPlugin = AuthMethod.getAuthPlugin(authName, scramble, password.getBytes());
+                packetNumber = sendPacket(channel, authPlugin.toByteArray(), packetNumber);
+                authFinishOrSwitch(channel, scramble, packetNumber);
+                break;
+            case (byte) 0x01:
+                // auth_more_data 包
+                if (result.length == 2) {
+                    if (result[1] == (byte) 0x03) {
+                        // 握手成功
+                        // 快速身份验证成功
+                    } else if (result[1] == (byte) 0x04) {
+                        //完全身份验证请求
+                        // 安全连接
+                        if (channel.isUsingSSLSocket()) {
+                            // 安全连接 发送明文密码
+                            byte[] content = UnionEncryptor.union(password.getBytes(), new byte[]{(byte)0x00});
+                            packetNumber = sendPacket(channel, content, packetNumber);
+
+                            authFinishOrSwitch(channel, authPluginData, packetNumber);
+                        } else {
+                            // 不安全连接
+                            if (serverPublicKey == null) {
+                                // 请求公钥
+                                byte[] content = {(byte)0x02};
+                                packetNumber = sendPacket(channel, content, packetNumber);
+                            }
+                            authFinishOrSwitch(channel, authPluginData, packetNumber);
+                        }
+                    }
+                } else {
+                    byte[] serverPublicKeyBytes = Arrays.copyOfRange(result, 1, result.length);
+                    serverPublicKey = ByteUtils.byteArrToHexStr(serverPublicKeyBytes);
+
+                    try {
+                        byte[] publicKey = ByteUtils.hexStrToByteArr(serverPublicKey);
+                        // RSA/None/OAEPPadding
+                        String padding = "RSA/None/PKCS1Padding";
+                        if (!channel.compareServerVersion("8.0.5")) {
+                            padding = "RSA/None/OAEPPadding";
+                        }
+                        byte[] temp = UnionEncryptor.union(password.getBytes(), ByteUtils.toBytes(0));
+                        temp = XOREncryptor.xor(temp, authPluginData);
+                        byte[] encryptedPasswd = RSAEncryptor.encrypt(publicKey, temp, padding);
+                        packetNumber = sendPacket(channel, encryptedPasswd, packetNumber);
+                        authFinishOrSwitch(channel, authPluginData, packetNumber);
+                    } catch (Exception e) {
+                        throw new RuntimeException(e);
+                    }
+                }
+                break;
         }
     }
 
-    private void switchAuthentication(final PacketChannel channel, byte[] authenticationResult, boolean usingSSLSocket)
-            throws IOException {
-        /*
-            Azure-MySQL likes to tell us to switch authentication methods, even though
-            we haven't advertised that we support any.  It uses this for some-odd
-            reason to send the real password scramble.
-        */
-        ByteArrayInputStream buffer = new ByteArrayInputStream(authenticationResult);
-        //noinspection ResultOfMethodCallIgnored
-        buffer.read(1);
-
-        String authName = buffer.readZeroTerminatedString();
-        if ("mysql_native_password".equals(authName)) {
-            String scramble = buffer.readZeroTerminatedString();
-
-            Command switchCommand = new AuthenticateNativePasswordCommand(scramble, password);
-            channel.write(switchCommand, (usingSSLSocket ? 4 : 3));
-            byte[] authResult = channel.read();
-
-            if (authResult[0] != (byte) 0x00) {
-                byte[] bytes = Arrays.copyOfRange(authResult, 1, authResult.length);
-                ErrorPacket errorPacket = new ErrorPacket(bytes);
-                throw new AuthenticationException(errorPacket.getErrorMessage(), errorPacket.getErrorCode(),
-                    errorPacket.getSqlState());
-            }
-        } else {
-            throw new AuthenticationException("Unsupported authentication type: " + authName);
-        }
+    private int sendPacket(final PacketChannel channel, byte[] content, int packetNumber) throws IOException {
+        channel.write(content, ++packetNumber);
+        return packetNumber;
     }
 
     private ExecutorService spawnKeepAliveThread(final long connectTimeout) {
@@ -894,6 +931,7 @@ public class BinaryLogClient implements BinaryLogClientMXBean {
                 logger.log(Level.WARNING, e.getMessage());
             }
         }
+
         unregisterLifecycleListener(connectListener);
         if (exceptionReference.get() != null) {
             throw exceptionReference.get();

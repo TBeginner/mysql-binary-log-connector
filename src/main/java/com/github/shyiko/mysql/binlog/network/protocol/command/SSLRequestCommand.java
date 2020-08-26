@@ -43,6 +43,8 @@ public class SSLRequestCommand implements Command {
         if (clientCapabilities == 0) {
             clientCapabilities = ClientCapabilities.LONG_FLAG |
                 ClientCapabilities.PROTOCOL_41 | ClientCapabilities.SECURE_CONNECTION;
+
+            clientCapabilities |= ClientCapabilities.PLUGIN_AUTH;
         }
         clientCapabilities |= ClientCapabilities.SSL;
         buffer.writeInteger(clientCapabilities, 4);

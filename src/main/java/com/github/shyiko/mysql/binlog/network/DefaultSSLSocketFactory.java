@@ -15,12 +15,16 @@
  */
 package com.github.shyiko.mysql.binlog.network;
 
+import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLSocket;
+import javax.net.ssl.TrustManagerFactory;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketException;
 import java.security.GeneralSecurityException;
+import java.security.KeyStore;
 
 /**
  * @author <a href="mailto:stanley.shyiko@gmail.com">Stanley Shyiko</a>
@@ -30,7 +34,7 @@ public class DefaultSSLSocketFactory implements SSLSocketFactory {
     private final String protocol;
 
     public DefaultSSLSocketFactory() {
-        this("TLSv1");
+        this("TLSv1.2");
     }
 
     /**
@@ -46,7 +50,7 @@ public class DefaultSSLSocketFactory implements SSLSocketFactory {
         try {
             sc = SSLContext.getInstance(this.protocol);
             initSSLContext(sc);
-        } catch (GeneralSecurityException e) {
+        } catch (Exception e) {
             throw new SocketException(e.getMessage());
         }
         try {
@@ -57,8 +61,48 @@ public class DefaultSSLSocketFactory implements SSLSocketFactory {
         }
     }
 
-    protected void initSSLContext(SSLContext sc) throws GeneralSecurityException {
-        sc.init(null, null, null);
+    /**
+     * 下面被注释的代码，需要密钥库才可以运行。
+     * <p>使用<code>SSLMode.REQUIRED</code>时不对证书进行认证校验。</p>
+     * <p>使用<code>SSLMode.VERIFY_CA</code>和<code>SSLMode.VERIFY_IDENTITY</code>时将对证书进行认证校验。</p>
+     * @param context
+     * @throws Exception
+     */
+    protected void initSSLContext(SSLContext context) throws Exception {
+//        String keystorePath = "D:\\Program Files\\mysql-8.0.18-winx64\\data\\client.keystore";
+//        String trustKeystorePath = "D:\\Program Files\\mysql-8.0.18-winx64\\data\\ca-trust.keystore";
+//        String keystorePassword = "123456";
+//
+//        //客户端证书库
+//        KeyStore clientKeystore = KeyStore.getInstance("pkcs12");
+//        FileInputStream keystoreFis = new FileInputStream(keystorePath);
+//        clientKeystore.load(keystoreFis, keystorePassword.toCharArray());
+//
+//        //信任证书库
+//        KeyStore trustKeystore = KeyStore.getInstance("jks");
+//        FileInputStream trustKeystoreFis = new FileInputStream(trustKeystorePath);
+//        trustKeystore.load(trustKeystoreFis, keystorePassword.toCharArray());
+//
+//        //密钥库
+//        KeyManagerFactory kmf = KeyManagerFactory.getInstance("Sunx509");
+//        kmf.init(clientKeystore, keystorePassword.toCharArray());
+//
+//        //信任库
+//        TrustManagerFactory tmf = TrustManagerFactory.getInstance("Sunx509");
+//        tmf.init(trustKeystore);
+//
+//        //初始化SSL上下文
+//        context.init(kmf.getKeyManagers(), tmf.getTrustManagers(), null);
+
+        context.init(null, null, null);
     }
 
+    public static void main(String[] args) {
+        try {
+            DefaultSSLSocketFactory factory = new DefaultSSLSocketFactory();
+            factory.initSSLContext(null);
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
 }

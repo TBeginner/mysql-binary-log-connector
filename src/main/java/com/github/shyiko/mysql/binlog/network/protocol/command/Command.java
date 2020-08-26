@@ -25,5 +25,4 @@ import java.io.IOException;
 public interface Command extends Packet {
 
     byte[] toByteArray() throws IOException;
-
 }
